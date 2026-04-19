@@ -1,6 +1,6 @@
 // handlers/files.js — List, Get, Delete file operations
 
-const { S3Client, DeleteObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const {
@@ -9,7 +9,6 @@ const {
 } = require('@aws-sdk/lib-dynamodb');
 const { getUserFromToken } = require('../middleware/auth');
 const { response, errorResponse } = require('../utils/response');
-const { generateSignedCloudfrontUrl } = require('../utils/cloudfront');
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -36,7 +35,7 @@ exports.listFiles = async (event) => {
       Limit: Math.min(parseInt(limit), 100),
     };
 
-    // Keyword search — DynamoDB FilterExpression (scan-like, but scoped to user)
+    // Keyword search
     if (search) {
       params.FilterExpression += ' AND contains(fileName, :search)';
       params.ExpressionAttributeValues[':search'] = search;
@@ -48,7 +47,6 @@ exports.listFiles = async (event) => {
 
     const result = await dynamodb.send(new QueryCommand(params));
 
-    // Build next cursor for pagination
     const nextCursor = result.LastEvaluatedKey
       ? Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64')
       : null;
@@ -67,7 +65,7 @@ exports.listFiles = async (event) => {
 
 /**
  * GET /files/:fileId
- * Returns metadata + temporary signed download URL
+ * Returns metadata + temporary signed S3 download URL
  */
 exports.getFile = async (event) => {
   try {
@@ -85,8 +83,16 @@ exports.getFile = async (event) => {
 
     const file = result.Item;
 
-    // Generate signed CloudFront URL (expires in 1 hour)
-    const downloadUrl = generateSignedCloudfrontUrl(file.s3Key, 3600);
+    // Generate presigned S3 download URL (expires in 1 hour)
+    const downloadUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: file.s3Key,
+        ResponseContentDisposition: `attachment; filename="${file.fileName}"`,
+      }),
+      { expiresIn: 3600 }
+    );
 
     // Update last accessed timestamp
     await dynamodb.send(new UpdateCommand({
@@ -113,7 +119,6 @@ exports.deleteFile = async (event) => {
     const { fileId } = event.pathParameters;
     const { permanent } = event.queryStringParameters || {};
 
-    // Verify ownership
     const result = await dynamodb.send(new GetCommand({
       TableName: TABLE,
       Key: { userId: user.sub, fileId },
@@ -140,7 +145,7 @@ exports.deleteFile = async (event) => {
       return response(200, { message: 'File permanently deleted', fileId });
     }
 
-    // Soft delete: mark as deleted (trash bin — recoverable for 30 days)
+    // Soft delete: mark as deleted
     await dynamodb.send(new UpdateCommand({
       TableName: TABLE,
       Key: { userId: user.sub, fileId },
