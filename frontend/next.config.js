@@ -1,11 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true,
-  output: 'standalone', // Required for AWS Amplify SSR
+  output: 'export',
+  trailingSlash: true,
   images: {
-    domains: [
-      process.env.NEXT_PUBLIC_CLOUDFRONT_DOMAIN || 'localhost',
-    ],
+    unoptimized: true,
   },
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
