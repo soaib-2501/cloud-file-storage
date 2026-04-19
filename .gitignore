@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+frontend/.next/
+frontend/out/
+
+# Build
+.aws-sam/
+.build/
+dist/
+
+# Environment files — NEVER commit these
+.env
+.env.local
+.env.*.local
+frontend/.env.local
+
+# Keys — NEVER commit these
+*.pem
+*.key
+*.b64
+cloudfront-private*
+cloudfront-public.pem
+
+# AWS SAM
+infrastructure/.aws-sam/
+infrastructure/packaged.yaml
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

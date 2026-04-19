@@ -1,0 +1,240 @@
+openapi: 3.0.0
+info:
+  title: Cloud File Storage API
+  version: 1.0.0
+  description: |
+    REST API for the Cloud-Based File Storage & Management System.
+    All endpoints require a valid Cognito JWT token in the Authorization header.
+
+servers:
+  - url: https://{apiId}.execute-api.us-east-1.amazonaws.com/prod
+    description: Production (AWS API Gateway)
+  - url: http://localhost:3001
+    description: Local (SAM Local)
+
+components:
+  securitySchemes:
+    CognitoAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: AWS Cognito ID token
+
+  schemas:
+    FileRecord:
+      type: object
+      properties:
+        userId:       { type: string }
+        fileId:       { type: string, format: uuid }
+        fileName:     { type: string }
+        s3Key:        { type: string }
+        contentType:  { type: string }
+        fileSize:     { type: integer }
+        parentFolder: { type: string }
+        status:       { type: string, enum: [pending, uploaded] }
+        isDeleted:    { type: boolean }
+        isShared:     { type: boolean }
+        createdAt:    { type: string, format: date-time }
+        updatedAt:    { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+security:
+  - CognitoAuth: []
+
+paths:
+
+  /files/upload-url:
+    post:
+      summary: Get presigned S3 upload URL
+      description: |
+        Returns a presigned S3 PUT URL. The browser uploads the file DIRECTLY
+        to S3 using this URL — bypasses Lambda for unlimited file size.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileName, fileSize]
+              properties:
+                fileName:     { type: string, example: "report.pdf" }
+                fileSize:     { type: integer, example: 1048576 }
+                mimeType:     { type: string, example: "application/pdf" }
+                parentFolder: { type: string, default: root }
+                description:  { type: string }
+      responses:
+        '200':
+          description: Presigned URL generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadUrl:   { type: string, format: uri }
+                  fileId:      { type: string, format: uuid }
+                  s3Key:       { type: string }
+                  expiresIn:   { type: integer, description: seconds }
+
+  /files:
+    get:
+      summary: List files in a folder
+      parameters:
+        - name: folder
+          in: query
+          schema: { type: string, default: root }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Pagination cursor (base64 encoded)
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:      { type: array, items: { $ref: '#/components/schemas/FileRecord' } }
+                  nextCursor: { type: string, nullable: true }
+                  count:      { type: integer }
+
+  /files/{fileId}:
+    get:
+      summary: Get file metadata + signed download URL
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/FileRecord'
+                  - type: object
+                    properties:
+                      downloadUrl: { type: string, format: uri }
+
+    put:
+      summary: Update file metadata (rename, move, tag)
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fileName:     { type: string }
+                description:  { type: string }
+                tags:         { type: array, items: { type: string } }
+                parentFolder: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  fileId:  { type: string }
+
+    delete:
+      summary: Delete file (soft delete to trash by default)
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: permanent
+          in: query
+          schema: { type: boolean, default: false }
+          description: If true, permanently deletes from S3 and DynamoDB
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  fileId:  { type: string }
+
+  /files/{fileId}/share:
+    post:
+      summary: Generate a time-limited shareable link
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expiresInHours:
+                  type: integer
+                  default: 24
+                  maximum: 168
+                  description: Link expiry (max 7 days)
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shareId:       { type: string }
+                  shareUrl:      { type: string, format: uri }
+                  fileName:      { type: string }
+                  expiresAt:     { type: string, format: date-time }
+                  expiresInHours: { type: integer }
+
+  /folders:
+    get:
+      summary: List all folders
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  folders: { type: array, items: { $ref: '#/components/schemas/FileRecord' } }
+
+    post:
+      summary: Create a new folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folderName]
+              properties:
+                folderName:   { type: string, maxLength: 100 }
+                parentFolder: { type: string, default: root }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  folder: { $ref: '#/components/schemas/FileRecord' }

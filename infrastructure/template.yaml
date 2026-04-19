@@ -1,0 +1,472 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Cloud File Storage System - AWS Free Tier
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        S3_BUCKET_NAME: !Ref FileStorageBucket
+        DYNAMODB_TABLE: !Ref FileMetadataTable
+        COGNITO_USER_POOL_ID: !Ref CognitoUserPool
+        COGNITO_CLIENT_ID: !Ref CognitoUserPoolClient
+        SNS_TOPIC_ARN: !Ref UploadNotificationTopic
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+Parameters:
+  AppName:
+    Type: String
+    Default: cloud-file-storage
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+  SESFromEmail:
+    Type: String
+    Description: Verified SES email for notifications
+
+Resources:
+
+  # ── DYNAMODB ──
+  FileMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-FileMetadata'
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: fileId
+          AttributeType: S
+        - AttributeName: parentFolder
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: fileId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: FolderIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: parentFolder
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 3
+            WriteCapacityUnits: 3
+        - IndexName: CreatedAtIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 3
+            WriteCapacityUnits: 3
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # ── COGNITO ──
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AppName}-users'
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+        - Name: name
+          Required: false
+          Mutable: true
+      MfaConfiguration: OPTIONAL
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AppName}-web-client'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  # ── SNS TOPIC ──
+  UploadNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AppName}-upload-notifications'
+
+  # ── S3 BUCKET ──
+  FileStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AppName}-files-${AWS::AccountId}'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+            AllowedOrigins: ['*']
+            MaxAge: 3600
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
+  # ── CLOUDFRONT ──
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AppName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontPublicKey:
+    Type: AWS::CloudFront::PublicKey
+    Properties:
+      PublicKeyConfig:
+        Name: !Sub '${AppName}-public-key'
+        CallerReference: !Sub '${AppName}-ref-v1'
+        EncodedKey: |
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuEY5mBf6loJEu/bepzlt
+          h/PFTV0sPqTRoWK9vBC5HHTNppSodkTS+1k46zcsAdbIdF490oGEJapSNvLvSgIB
+          nXmf5bl2rfKXvYlvdQmcUiDoA6xfUiRxiecJeQKtySiIONtlPsfN+kmcIs3ztDmo
+          v1evR21ffcKeOb1fiNm4q/J4cPYnz2YwTlLacRwMpxdlCKv5aP/q7HPCEO9Wuc5F
+          92VqdiTTQlTmjwO9a2+RSHeIKVXW5xq88Wv8e7QwFUG3yynSxRqYPJ4mTOEjpYsf
+          kYy4rpKKX1nQ67lqDqzSwf9It6I5fbSIvrhPf5QD35PL3uFCoyEXDkXWzyGNpkFu
+          5wIDAQAB
+          -----END PUBLIC KEY-----
+
+  CloudFrontKeyGroup:
+    Type: AWS::CloudFront::KeyGroup
+    DependsOn: CloudFrontPublicKey
+    Properties:
+      KeyGroupConfig:
+        Name: !Sub '${AppName}-key-group'
+        Items:
+          - !Ref CloudFrontPublicKey
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - FileStorageBucket
+      - CloudFrontKeyGroup
+      - CloudFrontOriginAccessControl
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AppName} file delivery CDN'
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          TrustedKeyGroups:
+            - !Ref CloudFrontKeyGroup
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FileStorageBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
+            S3OriginConfig: {}
+        PriceClass: PriceClass_100
+
+  FileStorageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: CloudFrontDistribution
+    Properties:
+      Bucket: !Ref FileStorageBucket
+      PolicyDocument:
+        Statement:
+          - Sid: CloudFrontAccess
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FileStorageBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # ── API GATEWAY ──
+  FileStorageApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AppName}-api'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Requested-With'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+        AddDefaultAuthorizerToCorsPreflight: false
+
+  # ── LAMBDA FUNCTIONS ──
+
+  GetUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-get-upload-url'
+      CodeUri: ../backend/
+      Handler: src/handlers/upload.getUploadUrl
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref FileStorageBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FileMetadataTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /files/upload-url
+            Method: POST
+
+  ListFilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-list-files'
+      CodeUri: ../backend/
+      Handler: src/handlers/files.listFiles
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FileMetadataTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /files
+            Method: GET
+
+  GetFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-get-file'
+      CodeUri: ../backend/
+      Handler: src/handlers/files.getFile
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FileMetadataTable
+        - S3ReadPolicy:
+            BucketName: !Ref FileStorageBucket
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /files/{fileId}
+            Method: GET
+
+  DeleteFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-delete-file'
+      CodeUri: ../backend/
+      Handler: src/handlers/files.deleteFile
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FileMetadataTable
+        - S3CrudPolicy:
+            BucketName: !Ref FileStorageBucket
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /files/{fileId}
+            Method: DELETE
+
+  CreateFolderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-create-folder'
+      CodeUri: ../backend/
+      Handler: src/handlers/folders.createFolder
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FileMetadataTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /folders
+            Method: POST
+
+  ListFoldersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-list-folders'
+      CodeUri: ../backend/
+      Handler: src/handlers/folders.listFolders
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FileMetadataTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /folders
+            Method: GET
+
+  ShareFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-share-file'
+      CodeUri: ../backend/
+      Handler: src/handlers/share.shareFile
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FileMetadataTable
+        - S3ReadPolicy:
+            BucketName: !Ref FileStorageBucket
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileStorageApi
+            Path: /files/{fileId}/share
+            Method: POST
+
+  S3EventHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-s3-event-handler'
+      CodeUri: ../backend/
+      Handler: src/handlers/events.s3EventHandler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FileMetadataTable
+        - S3ReadPolicy:
+            BucketName: !Ref FileStorageBucket
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt UploadNotificationTopic.TopicName
+
+  NotificationHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-notification-handler'
+      CodeUri: ../backend/
+      Handler: src/handlers/notifications.handleUploadNotification
+      Environment:
+        Variables:
+          SES_FROM_EMAIL: !Ref SESFromEmail
+      Policies:
+        - SESCrudPolicy:
+            IdentityName: !Ref SESFromEmail
+
+  # ── PERMISSIONS ──
+
+  S3EventHandlerPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - S3EventHandlerFunction
+      - FileStorageBucket
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt S3EventHandlerFunction.Arn
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${AppName}-files-${AWS::AccountId}'
+
+  NotificationHandlerSNSPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - NotificationHandlerFunction
+      - UploadNotificationTopic
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt NotificationHandlerFunction.Arn
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref UploadNotificationTopic
+
+  NotificationHandlerSNSSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn:
+      - NotificationHandlerFunction
+      - NotificationHandlerSNSPermission
+      - UploadNotificationTopic
+    Properties:
+      TopicArn: !Ref UploadNotificationTopic
+      Protocol: lambda
+      Endpoint: !GetAtt NotificationHandlerFunction.Arn
+
+  # ── CLOUDWATCH ──
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AppName}-lambda-errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+  ApiUrl:
+    Value: !Sub 'https://${FileStorageApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Description: API Gateway endpoint URL
+  CloudFrontUrl:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Description: CloudFront CDN URL
+  UserPoolId:
+    Value: !Ref CognitoUserPool
+    Description: Cognito User Pool ID
+  UserPoolClientId:
+    Value: !Ref CognitoUserPoolClient
+    Description: Cognito User Pool Client ID
+  S3BucketName:
+    Value: !Ref FileStorageBucket
+    Description: S3 Bucket name
+  DynamoDBTable:
+    Value: !Ref FileMetadataTable
+    Description: DynamoDB table name

@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "cloud-file-storage"
+resolve_s3 = true
+s3_prefix = "cloud-file-storage"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "AppName=\"cloud-file-storage\" Environment=\"prod\" SESFromEmail=\"chsoaib24@gmail.com\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

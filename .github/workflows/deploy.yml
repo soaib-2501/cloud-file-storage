@@ -1,0 +1,130 @@
+name: Deploy Cloud File Storage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  SAM_STACK_NAME: cloud-file-storage
+
+jobs:
+  # ── TEST ────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run backend tests
+        working-directory: backend
+        run: npm test
+
+  # ── DEPLOY BACKEND ──────────────────────
+  deploy-backend:
+    name: Deploy Backend (AWS SAM)
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      api-url: ${{ steps.sam-outputs.outputs.api-url }}
+      cloudfront-url: ${{ steps.sam-outputs.outputs.cloudfront-url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci --production
+
+      - name: SAM Build
+        working-directory: infrastructure
+        run: sam build
+
+      - name: SAM Deploy
+        working-directory: infrastructure
+        run: |
+          sam deploy \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment=prod \
+              SESFromEmail=${{ secrets.SES_FROM_EMAIL }}
+
+      - name: Get SAM outputs
+        id: sam-outputs
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+          CF_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
+            --output text)
+          echo "api-url=$API_URL" >> $GITHUB_OUTPUT
+          echo "cloudfront-url=$CF_URL" >> $GITHUB_OUTPUT
+          echo "✅ API: $API_URL"
+          echo "✅ CDN: $CF_URL"
+
+  # ── DEPLOY FRONTEND ─────────────────────
+  # Frontend deploys automatically via Amplify when you push to main.
+  # Connect your GitHub repo in AWS Amplify Console once — it handles all future deploys.
+  # This job just validates the build succeeds.
+  build-frontend:
+    name: Validate Frontend Build
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: ${{ needs.deploy-backend.outputs.api-url }}
+          NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${{ secrets.COGNITO_USER_POOL_ID }}
+          NEXT_PUBLIC_COGNITO_CLIENT_ID: ${{ secrets.COGNITO_CLIENT_ID }}
+          NEXT_PUBLIC_CLOUDFRONT_URL: ${{ needs.deploy-backend.outputs.cloudfront-url }}
+          NEXT_PUBLIC_AWS_REGION: ${{ env.AWS_REGION }}
+        run: npm run build
+
+      - name: Build succeeded
+        run: echo "✅ Frontend build passed — Amplify will deploy automatically"
